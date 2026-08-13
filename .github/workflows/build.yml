@@ -10,10 +10,9 @@ jobs:
 
       - name: Extract Project ZIP
         run: |
-          # Yeh command aapki repository ke andar padi hui zip ko furan extract karegi
           unzip *.zip -d extracted_project
           
-          # Automated path solver for nested folders
+          # Path solver for nested folders
           find extracted_project -name "pubspec.yaml" -exec dirname {} \; > project_path.txt
           PROJECT_DIR=$(cat project_path.txt)
           echo "Found project root at: $PROJECT_DIR"
@@ -33,6 +32,13 @@ jobs:
 
       - name: Fetch App Dependencies
         run: flutter pub get
+
+      - name: Fix Missing Gradle Wrapper
+        run: |
+          # Yeh command automatic missing ya corrupt gradle-wrapper files ko naye siray se generate kar degi
+          cd android
+          gradle wrapper --gradle-version 8.0 --distribution-type bin
+          cd ..
 
       - name: Compile Asli APK
         run: flutter build apk --release
