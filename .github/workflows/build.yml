@@ -8,19 +8,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Extract Project ZIP
-        run: |
-          mkdir extracted_project
-          unzip -q *.zip -d extracted_project
-
-          PROJECT_DIR=$(find extracted_project -name "pubspec.yaml" -print -quit | xargs dirname)
-
-          echo "Project root: $PROJECT_DIR"
-
-          cp -R "$PROJECT_DIR"/. .
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -31,24 +21,97 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.7'
           channel: stable
 
-      - name: Flutter Version
-        run: flutter --version
+      - name: Flutter Clean
+        run: flutter clean
 
       - name: Get Dependencies
         run: flutter pub get
 
-      - name: Clean Flutter Build
-        run: flutter clean
+      # FIX flutter_wallpaper_manager namespace
+      - name: Patch flutter_wallpaper_manager
+        shell: bash
+        run: |
+          set -e
 
-      - name: Get Dependencies Again
-        run: flutter pub get
+          echo "Searching for flutter_wallpaper_manager..."
 
+          PACKAGE_DIR=$(find "$HOME/.pub-cache" \
+            -type d \
+            -path "*/flutter_wallpaper_manager-*/android" \
+            | head -n 1)
+
+          if [ -z "$PACKAGE_DIR" ]; then
+            echo "ERROR: flutter_wallpaper_manager Android folder not found."
+            exit 1
+          fi
+
+          echo "Found package:"
+          echo "$PACKAGE_DIR"
+
+          BUILD_FILE="$PACKAGE_DIR/build.gradle"
+
+          if [ ! -f "$BUILD_FILE" ]; then
+            echo "ERROR: build.gradle not found."
+            exit 1
+          fi
+
+          echo "Before patch:"
+          cat "$BUILD_FILE"
+
+          python3 - "$BUILD_FILE" <<'PY'
+          import sys
+          import re
+
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          namespace = 'namespace "com.flutter_wallpaper_manager"'
+
+          if re.search(r'(?m)^\s*namespace\s+["\']', text):
+              print("Namespace already exists.")
+          else:
+              match = re.search(r'android\s*\{', text)
+
+              if not match:
+                  raise SystemExit(
+                      "ERROR: android { block not found in plugin build.gradle"
+                  )
+
+              pos = match.end()
+
+              text = (
+                  text[:pos]
+                  + "\n    "
+                  + namespace
+                  + "\n"
+                  + text[pos:]
+              )
+
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(text)
+
+              print("Namespace added successfully.")
+
+          PY
+
+          echo "After patch:"
+          cat "$BUILD_FILE"
+
+          echo "Verifying namespace..."
+
+          grep -q 'namespace "com.flutter_wallpaper_manager"' "$BUILD_FILE"
+
+          echo "SUCCESS: Namespace verified."
+
+      # Build APK
       - name: Build Release APK
         run: flutter build apk --release
 
+      # Save APK
       - name: Save Real APK File
         uses: actions/upload-artifact@v4
         with:
