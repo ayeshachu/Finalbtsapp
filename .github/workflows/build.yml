@@ -12,86 +12,85 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ==========================================
-      # EXTRACT THE PROJECT ZIP
-      # ==========================================
-
       - name: Extract Flutter Project
         shell: bash
         run: |
           set -e
 
-          echo "Repository files:"
-          ls -la
+          echo "Repository:"
+          find . -maxdepth 2 -type f | sort
 
-          ZIP_FILE=$(find . \
-            -maxdepth 1 \
-            -type f \
-            -iname "*.zip" \
-            -print -quit)
+          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" -print -quit || true)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No project ZIP found."
+            echo "ERROR: ZIP file not found."
             exit 1
           fi
 
-          echo "Using ZIP:"
+          echo "ZIP:"
           echo "$ZIP_FILE"
 
           rm -rf extracted_project
           mkdir -p extracted_project
 
-          unzip -o "$ZIP_FILE" -d extracted_project
+          unzip -o "$ZIP_FILE" -d extracted_project >/dev/null
 
           echo "Searching for pubspec.yaml..."
 
           PUBSPEC=$(find extracted_project \
             -type f \
             -name "pubspec.yaml" \
-            -print -quit)
+            -print -quit || true)
 
           if [ -z "$PUBSPEC" ]; then
             echo "ERROR: pubspec.yaml not found inside ZIP."
-            echo "Extracted files:"
-            find extracted_project -maxdepth 4 -type f | head -200
+            find extracted_project -maxdepth 5 -type f | sort | head -300
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$PUBSPEC")
 
-          echo "================================="
-          echo "Flutter project found:"
+          echo "Flutter project:"
           echo "$PROJECT_DIR"
-          echo "================================="
 
-          # Copy project to repository root
-          shopt -s dotglob
-          cp -R "$PROJECT_DIR"/* .
-          shopt -u dotglob
+          echo "Checking Android files..."
 
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "ERROR: Project was not copied correctly."
+          APP_GRADLE=$(find "$PROJECT_DIR" \
+            -type f \
+            \( -path "*/android/app/build.gradle" \
+               -o -path "*/android/app/build.gradle.kts" \) \
+            -print -quit || true)
+
+          if [ -z "$APP_GRADLE" ]; then
+            echo "ERROR: Android app Gradle file not found."
+
+            echo "Android files inside project:"
+            find "$PROJECT_DIR/android" \
+              -type f \
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              -print || true
+
             exit 1
           fi
 
-          echo "Flutter project is now at repository root."
+          echo "APP_GRADLE=$APP_GRADLE" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project files:"
-          ls -la
+          echo "================================"
+          echo "PROJECT_DIR:"
+          echo "$PROJECT_DIR"
+          echo "================================"
 
-      # ==========================================
-      # JAVA
-      # ==========================================
+          echo "================================"
+          echo "APP_GRADLE:"
+          echo "$APP_GRADLE"
+          echo "================================"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: "17"
-
-      # ==========================================
-      # FLUTTER
-      # ==========================================
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -101,21 +100,19 @@ jobs:
       - name: Flutter Version
         run: flutter --version
 
-      # ==========================================
-      # FLUTTER CLEAN + PUB GET
-      # ==========================================
-
       - name: Flutter Clean
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter clean
 
-      - name: Get Dependencies
+      - name: Flutter Pub Get
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
       # ==========================================
-      # FIX WALLPAPER MANAGER
+      # WALLPAPER MANAGER NAMESPACE
       # ==========================================
 
-      - name: Fix flutter_wallpaper_manager Namespace
+      - name: Fix Wallpaper Manager Namespace
         shell: bash
         run: |
           set -e
@@ -134,9 +131,6 @@ jobs:
 
           PLUGIN_BUILD="$PLUGIN_DIR/android/build.gradle"
 
-          echo "Plugin:"
-          echo "$PLUGIN_BUILD"
-
           if [ ! -f "$PLUGIN_BUILD" ]; then
             echo "ERROR: Plugin build.gradle not found."
             exit 1
@@ -151,14 +145,13 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
 
-          if re.search(r'(?m)^\s*namespace\s+["\']', text):
-              print("Namespace already exists.")
-          else:
+          if not re.search(r'(?m)^\s*namespace\s+["\']', text):
+
               match = re.search(r'android\s*\{', text)
 
               if not match:
                   raise SystemExit(
-                      "ERROR: android block not found."
+                      "ERROR: android block not found in plugin."
                   )
 
               text = (
@@ -170,12 +163,11 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(text)
 
-              print("Namespace added successfully.")
-
+          print("Wallpaper manager namespace OK.")
           PY
 
       # ==========================================
-      # FIX LOCAL NOTIFICATIONS DESUGARING
+      # CORE LIBRARY DESUGARING
       # ==========================================
 
       - name: Enable Core Library Desugaring
@@ -183,17 +175,22 @@ jobs:
         run: |
           set -e
 
-          APP_GRADLE="android/app/build.gradle"
-
-          echo "Checking:"
+          echo "Patching:"
           echo "$APP_GRADLE"
 
           if [ ! -f "$APP_GRADLE" ]; then
-            echo "ERROR: android/app/build.gradle not found."
+            echo "ERROR: App Gradle file disappeared."
             exit 1
           fi
 
-          python3 - "$APP_GRADLE" <<'PY'
+          case "$APP_GRADLE" in
+            *.gradle.kts)
+              echo "Gradle Kotlin DSL detected."
+              echo "This project uses build.gradle.kts."
+              ;;
+
+            *.gradle)
+              python3 - "$APP_GRADLE" <<'PY'
           import sys
           import re
 
@@ -202,7 +199,10 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
 
-          # Add compileOptions
+          # ------------------------------------------
+          # compileOptions
+          # ------------------------------------------
+
           if "coreLibraryDesugaringEnabled true" not in text:
 
               match = re.search(
@@ -243,13 +243,11 @@ jobs:
 
                   text = text[:pos] + block + text[pos:]
 
-          # Add desugaring dependency
-          if "desugar_jdk_libs" not in text:
+          # ------------------------------------------
+          # dependency
+          # ------------------------------------------
 
-              dependency = (
-                  "coreLibraryDesugaring "
-                  "'com.android.tools:desugar_jdk_libs:2.1.5'"
-              )
+          if "desugar_jdk_libs" not in text:
 
               match = re.search(
                   r'dependencies\s*\{',
@@ -263,47 +261,41 @@ jobs:
 
               pos = match.end()
 
-              text = (
-                  text[:pos]
-                  + "\n    "
-                  + dependency
-                  + "\n"
-                  + text[pos:]
-              )
+              dependency = """
+              coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+              """
+
+              text = text[:pos] + dependency + text[pos:]
 
           with open(path, "w", encoding="utf-8") as f:
               f.write(text)
 
-          print("Desugaring successfully configured.")
-
+          print("Core library desugaring enabled.")
           PY
+              ;;
+
+            *)
+              echo "ERROR: Unsupported Gradle file:"
+              echo "$APP_GRADLE"
+              exit 1
+              ;;
+          esac
 
       # ==========================================
-      # VERIFY
-      # ==========================================
-
-      - name: Verify Android Project
-        run: |
-          test -f pubspec.yaml
-          test -f android/app/build.gradle
-          echo "Flutter project verified."
-          echo "pubspec.yaml: OK"
-          echo "android/app/build.gradle: OK"
-
-      # ==========================================
-      # BUILD APK
+      # BUILD
       # ==========================================
 
       - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
       # ==========================================
-      # SAVE APK
+      # APK ARTIFACT
       # ==========================================
 
-      - name: Save Real APK File
+      - name: Save APK
         uses: actions/upload-artifact@v4
         with:
           name: Real-BTS-Army-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
