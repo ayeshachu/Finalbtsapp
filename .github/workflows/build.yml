@@ -12,6 +12,25 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Find Flutter Project
+        id: find_project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=$(find . -name "pubspec.yaml" \
+            -not -path "./.git/*" \
+            -print -quit \
+            | xargs dirname)
+
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+          fi
+
+          echo "Flutter project found at: $PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -24,18 +43,19 @@ jobs:
           channel: stable
 
       - name: Flutter Clean
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
         run: flutter clean
 
-      - name: Get Dependencies
+      - name: Flutter Pub Get
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
         run: flutter pub get
 
-      # FIX flutter_wallpaper_manager namespace
       - name: Patch flutter_wallpaper_manager
         shell: bash
         run: |
           set -e
 
-          echo "Searching for flutter_wallpaper_manager..."
+          echo "Searching flutter_wallpaper_manager..."
 
           PACKAGE_DIR=$(find "$HOME/.pub-cache" \
             -type d \
@@ -47,18 +67,10 @@ jobs:
             exit 1
           fi
 
-          echo "Found package:"
-          echo "$PACKAGE_DIR"
-
           BUILD_FILE="$PACKAGE_DIR/build.gradle"
 
-          if [ ! -f "$BUILD_FILE" ]; then
-            echo "ERROR: build.gradle not found."
-            exit 1
-          fi
-
-          echo "Before patch:"
-          cat "$BUILD_FILE"
+          echo "Package build file:"
+          echo "$BUILD_FILE"
 
           python3 - "$BUILD_FILE" <<'PY'
           import sys
@@ -69,8 +81,6 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
 
-          namespace = 'namespace "com.flutter_wallpaper_manager"'
-
           if re.search(r'(?m)^\s*namespace\s+["\']', text):
               print("Namespace already exists.")
           else:
@@ -78,17 +88,17 @@ jobs:
 
               if not match:
                   raise SystemExit(
-                      "ERROR: android { block not found in plugin build.gradle"
+                      "ERROR: android { block not found."
                   )
 
-              pos = match.end()
+              namespace = 'namespace "com.flutter_wallpaper_manager"'
 
               text = (
-                  text[:pos]
+                  text[:match.end()]
                   + "\n    "
                   + namespace
                   + "\n"
-                  + text[pos:]
+                  + text[match.end():]
               )
 
               with open(path, "w", encoding="utf-8") as f:
@@ -98,22 +108,16 @@ jobs:
 
           PY
 
-          echo "After patch:"
-          cat "$BUILD_FILE"
-
-          echo "Verifying namespace..."
-
           grep -q 'namespace "com.flutter_wallpaper_manager"' "$BUILD_FILE"
 
-          echo "SUCCESS: Namespace verified."
+          echo "Namespace verification successful."
 
-      # Build APK
       - name: Build Release APK
+        working-directory: ${{ steps.find_project.outputs.project_dir }}
         run: flutter build apk --release
 
-      # Save APK
       - name: Save Real APK File
         uses: actions/upload-artifact@v4
         with:
           name: BTS-Army-World-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.find_project.outputs.project_dir }}/build/app/outputs/flutter-apk/app-release.apk        
