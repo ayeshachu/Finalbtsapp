@@ -16,38 +16,45 @@ jobs:
         run: |
           set -e
 
-          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
+          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1 || true)
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found."
+          if [ -n "$ZIP_FILE" ]; then
+            echo "ZIP found: $ZIP_FILE"
+
+            rm -rf extracted_project
+            mkdir extracted_project
+
+            unzip -q "$ZIP_FILE" -d extracted_project
+
+            PUBSPEC=$(find extracted_project \
+              -type f \
+              -name "pubspec.yaml" \
+              -print -quit)
+          else
+            echo "No ZIP found. Searching repository..."
+            PUBSPEC=$(find . \
+              -not -path "./.git/*" \
+              -type f \
+              -name "pubspec.yaml" \
+              -print -quit)
+          fi
+
+          if [ -z "$PUBSPEC" ]; then
+            echo "ERROR: pubspec.yaml not found."
             exit 1
           fi
 
-          echo "ZIP found: $ZIP_FILE"
-
-          rm -rf extracted_project
-          mkdir extracted_project
-
-          unzip -q "$ZIP_FILE" -d extracted_project
-
-          PROJECT_DIR=$(find extracted_project -type f -name "pubspec.yaml" -printf '%h\n' | head -n 1)
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: pubspec.yaml not found inside ZIP."
-            find extracted_project -maxdepth 3 -type f | head -n 100
-            exit 1
-          fi
+          PROJECT_DIR=$(dirname "$PUBSPEC")
 
           echo "Flutter project root: $PROJECT_DIR"
 
-          shopt -s dotglob
-          cp -R "$PROJECT_DIR"/* .
-          shopt -u dotglob
-
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "ERROR: pubspec.yaml was not copied."
-            exit 1
+          if [ "$PROJECT_DIR" != "." ]; then
+            shopt -s dotglob
+            cp -R "$PROJECT_DIR"/* .
+            shopt -u dotglob
           fi
+
+          test -f pubspec.yaml
 
           echo "Flutter project successfully prepared."
 
@@ -73,7 +80,11 @@ jobs:
       - name: Get Dependencies
         run: flutter pub get
 
-      - name: Repair flutter_wallpaper_manager Namespace
+      # ==========================================
+      # FIX FLUTTER WALLPAPER MANAGER NAMESPACE
+      # ==========================================
+
+      - name: Fix flutter_wallpaper_manager Namespace
         shell: bash
         run: |
           set -e
@@ -86,7 +97,7 @@ jobs:
             | sort -V | tail -n 1)
 
           if [ -z "$PLUGIN_DIR" ]; then
-            echo "flutter_wallpaper_manager not found."
+            echo "ERROR: flutter_wallpaper_manager not found."
             exit 1
           fi
 
@@ -100,61 +111,183 @@ jobs:
             exit 1
           fi
 
-          echo "Plugin build.gradle:"
-          cat "$PLUGIN_BUILD"
-
-          if grep -q "namespace" "$PLUGIN_BUILD"; then
-            echo "Namespace already exists."
-          else
-            MANIFEST="$PLUGIN_DIR/android/src/main/AndroidManifest.xml"
-
-            if [ -f "$MANIFEST" ]; then
-              PACKAGE=$(grep -oP 'package="\K[^"]+' "$MANIFEST" | head -n 1 || true)
-            else
-              PACKAGE=""
-            fi
-
-            if [ -z "$PACKAGE" ]; then
-              PACKAGE="com.example.flutter_wallpaper_manager"
-            fi
-
-            echo "Using namespace: $PACKAGE"
-
-            python3 - "$PLUGIN_BUILD" "$PACKAGE" <<'PY'
+          python3 - "$PLUGIN_BUILD" <<'PY'
           import sys
+          import re
 
-          build_file = sys.argv[1]
-          namespace = sys.argv[2]
+          path = sys.argv[1]
 
-          with open(build_file, "r", encoding="utf-8") as f:
+          with open(path, "r", encoding="utf-8") as f:
               text = f.read()
 
-          if "android {" not in text:
-              raise SystemExit("ERROR: android block not found in ACTUAL plugin build.gradle")
+          if re.search(r'(?m)^\s*namespace\s+["\']', text):
+              print("Namespace already exists.")
+          else:
+              match = re.search(r'android\s*\{', text)
 
-          text = text.replace(
-              "android {",
-              f'android {{\n    namespace "{namespace}"',
-              1
-          )
+              if not match:
+                  raise SystemExit(
+                      "ERROR: android { block not found in actual plugin."
+                  )
 
-          with open(build_file, "w", encoding="utf-8") as f:
-              f.write(text)
+              namespace = 'namespace "com.flutter_wallpaper_manager"'
 
-          print("Namespace successfully added.")
+              text = (
+                  text[:match.end()]
+                  + "\n    "
+                  + namespace
+                  + "\n"
+                  + text[match.end():]
+              )
+
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(text)
+
+              print("Namespace added successfully.")
+
           PY
+
+          grep -q 'namespace "com.flutter_wallpaper_manager"' "$PLUGIN_BUILD"
+
+          echo "Namespace verification successful."
+
+      # ==========================================
+      # FIX FLUTTER LOCAL NOTIFICATIONS DESUGARING
+      # ==========================================
+
+      - name: Enable Core Library Desugaring
+        shell: bash
+        run: |
+          set -e
+
+          APP_GRADLE="android/app/build.gradle"
+
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "ERROR: android/app/build.gradle not found."
+            exit 1
           fi
 
-          echo "Final plugin build.gradle:"
-          cat "$PLUGIN_BUILD"
+          python3 - "$APP_GRADLE" <<'PY'
+          import sys
+          import re
 
-      - name: Verify Flutter Project
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              text = f.read()
+
+          # ------------------------------------------
+          # Add compileOptions
+          # ------------------------------------------
+
+          if "coreLibraryDesugaringEnabled true" not in text:
+
+              compile_match = re.search(
+                  r'compileOptions\s*\{',
+                  text
+              )
+
+              if compile_match:
+                  pos = compile_match.end()
+
+                  text = (
+                      text[:pos]
+                      + "\n        coreLibraryDesugaringEnabled true\n"
+                      + text[pos:]
+                  )
+
+              else:
+
+                  android_match = re.search(
+                      r'android\s*\{',
+                      text
+                  )
+
+                  if not android_match:
+                      raise SystemExit(
+                          "ERROR: android { block not found."
+                      )
+
+                  pos = android_match.end()
+
+                  block = """
+              
+              compileOptions {
+                  coreLibraryDesugaringEnabled true
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              """
+
+                  text = (
+                      text[:pos]
+                      + block
+                      + text[pos:]
+                  )
+
+          # ------------------------------------------
+          # Add desugaring dependency
+          # ------------------------------------------
+
+          dependency = (
+              "coreLibraryDesugaring "
+              "'com.android.tools:desugar_jdk_libs:2.1.5'"
+          )
+
+          if "desugar_jdk_libs" not in text:
+
+              dependency_match = re.search(
+                  r'dependencies\s*\{',
+                  text
+              )
+
+              if not dependency_match:
+                  raise SystemExit(
+                      "ERROR: dependencies { block not found."
+                  )
+
+              pos = dependency_match.end()
+
+              text = (
+                  text[:pos]
+                  + "\n    "
+                  + dependency
+                  + "\n"
+                  + text[pos:]
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print(
+              "Core library desugaring enabled successfully."
+          )
+
+          PY
+
+          echo "Updated android/app/build.gradle:"
+          cat "$APP_GRADLE"
+
+      # ==========================================
+      # VERIFY
+      # ==========================================
+
+      - name: Verify Project
         run: |
           test -f pubspec.yaml
+          test -f android/app/build.gradle
           flutter pub get
+
+      # ==========================================
+      # BUILD APK
+      # ==========================================
 
       - name: Build Release APK
         run: flutter build apk --release
+
+      # ==========================================
+      # SAVE APK
+      # ==========================================
 
       - name: Save Real APK File
         uses: actions/upload-artifact@v4
