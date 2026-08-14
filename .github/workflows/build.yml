@@ -1,51 +1,70 @@
 name: Flutter APK Cloud Compiler
-on: [workflow_dispatch]
+
+on:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Extract Project ZIP
         run: |
-          unzip *.zip -d extracted_project
-          
-          # Path solver for nested folders
-          find extracted_project -name "pubspec.yaml" -exec dirname {} \; > project_path.txt
-          PROJECT_DIR=$(cat project_path.txt)
-          echo "Found project root at: $PROJECT_DIR"
-          cp -r $PROJECT_DIR/* .
-          cp -r $PROJECT_DIR/.* . 2>/dev/null || true
+          mkdir extracted_project
+          unzip -q *.zip -d extracted_project
+
+          PROJECT_DIR=$(find extracted_project -name "pubspec.yaml" -print -quit | xargs dirname)
+
+          echo "Project found at: $PROJECT_DIR"
+
+          cp -r "$PROJECT_DIR"/. .
 
       - name: Setup Java Environment
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: zulu
           java-version: '17'
 
       - name: Setup Flutter Compiler
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
 
       - name: Fetch App Dependencies
-        run: flutter pub get
-
-      - name: Fix Missing Gradle Wrapper
         run: |
-          # Yeh command automatic missing ya corrupt gradle-wrapper files ko naye siray se generate kar degi
+          flutter pub get
+
+      - name: Install Gradle
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.0-bin.zip
+          unzip -q gradle-8.0-bin.zip
+          echo "$PWD/gradle-8.0/bin" >> $GITHUB_PATH
+
+      - name: Repair Gradle Wrapper
+        run: |
           cd android
           gradle wrapper --gradle-version 8.0 --distribution-type bin
+          chmod +x gradlew
           cd ..
 
-      - name: Compile Asli APK
-        run: flutter build apk --release
+      - name: Verify Gradle Wrapper
+        run: |
+          cd android
+          ./gradlew --version
+          cd ..
+
+      - name: Compile Real APK
+        run: |
+          flutter clean
+          flutter pub get
+          flutter build apk --release
 
       - name: Save Real APK File
         uses: actions/upload-artifact@v4
         with:
           name: Real-BTS-Army-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          
