@@ -12,10 +12,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ==========================================
-      # FIND ZIP AND FLUTTER PROJECT
-      # ==========================================
-
       - name: Extract Flutter Project
         shell: bash
         run: |
@@ -27,8 +23,6 @@ jobs:
             echo "ERROR: ZIP file not found."
             exit 1
           fi
-
-          echo "ZIP: $ZIP_FILE"
 
           rm -rf extracted_project
           mkdir -p extracted_project
@@ -47,24 +41,16 @@ jobs:
 
           PROJECT_DIR=$(dirname "$PUBSPEC")
 
-          echo "Flutter project:"
-          echo "$PROJECT_DIR"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # ==========================================
-      # JAVA
-      # ==========================================
+          echo "Flutter project:"
+          echo "$PROJECT_DIR"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: "17"
-
-      # ==========================================
-      # FLUTTER
-      # ==========================================
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -83,15 +69,13 @@ jobs:
         run: flutter pub get
 
       # ==========================================
-      # FIND ACTUAL APP GRADLE FILE
+      # FIND ACTUAL GRADLE FILE
       # ==========================================
 
-      - name: Locate Android App Gradle
+      - name: Locate App Gradle
         shell: bash
         run: |
           set -e
-
-          echo "Searching Android Gradle files..."
 
           APP_GRADLE=$(find "$PROJECT_DIR/android/app" \
             -maxdepth 1 \
@@ -100,23 +84,17 @@ jobs:
             -print -quit || true)
 
           if [ -z "$APP_GRADLE" ]; then
-            echo "ERROR: Android app Gradle file not found."
-
-            find "$PROJECT_DIR/android" \
-              -type f \
-              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
-              -print
-
+            echo "ERROR: App Gradle file not found."
             exit 1
           fi
 
-          echo "Actual Gradle file:"
-          echo "$APP_GRADLE"
-
           echo "APP_GRADLE=$APP_GRADLE" >> "$GITHUB_ENV"
 
+          echo "Found:"
+          echo "$APP_GRADLE"
+
       # ==========================================
-      # FORCE CORE LIBRARY DESUGARING
+      # FIX KOTLIN DSL DESUGARING
       # ==========================================
 
       - name: Fix Core Library Desugaring
@@ -124,12 +102,10 @@ jobs:
         run: |
           set -e
 
-          echo "Patching actual file:"
+          echo "Patching:"
           echo "$APP_GRADLE"
 
-          if [[ "$APP_GRADLE" == *.gradle.kts ]]; then
-
-            python3 - "$APP_GRADLE" <<'PY'
+          python3 - "$APP_GRADLE" <<'PY'
           import sys
 
           path = sys.argv[1]
@@ -137,114 +113,106 @@ jobs:
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
 
+          # ---------------------------------------
           # compileOptions
+          # ---------------------------------------
+
           if "isCoreLibraryDesugaringEnabled = true" not in text:
 
               if "compileOptions {" in text:
+
                   text = text.replace(
                       "compileOptions {",
-                      "compileOptions {\n        isCoreLibraryDesugaringEnabled = true",
+                      """compileOptions {
+                  isCoreLibraryDesugaringEnabled = true""",
                       1
                   )
-              else:
-                  text = text.replace(
-                      "android {",
-                      """android {
 
+              else:
+
+                  marker = "android {"
+
+                  if marker not in text:
+                      raise SystemExit(
+                          "ERROR: android block not found."
+                      )
+
+                  block = """
+              
               compileOptions {
                   isCoreLibraryDesugaringEnabled = true
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }
-              """,
+              """
+
+                  text = text.replace(
+                      marker,
+                      marker + block,
                       1
                   )
 
-          # dependency
+          # ---------------------------------------
+          # desugar_jdk_libs dependency
+          # ---------------------------------------
+
+          dependency = """
+              coreLibraryDesugaring(
+                  "com.android.tools:desugar_jdk_libs:2.1.5"
+              )
+          """
+
           if "desugar_jdk_libs" not in text:
 
-              if "dependencies {" not in text:
-                  raise SystemExit(
-                      "ERROR: dependencies block not found."
-                  )
+              if "dependencies {" in text:
 
-              text = text.replace(
-                  "dependencies {",
-                  """dependencies {
-                  coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")""",
-                  1
-              )
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(text)
-
-          print("Kotlin Gradle DSL desugaring configured.")
-          PY
-
-          else
-
-            python3 - "$APP_GRADLE" <<'PY'
-          import sys
-
-          path = sys.argv[1]
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          # compileOptions
-          if "coreLibraryDesugaringEnabled true" not in text:
-
-              if "compileOptions {" in text:
                   text = text.replace(
-                      "compileOptions {",
-                      "compileOptions {\n        coreLibraryDesugaringEnabled true",
+                      "dependencies {",
+                      "dependencies {" + dependency,
                       1
                   )
+
               else:
-                  text = text.replace(
-                      "android {",
-                      """android {
 
-              compileOptions {
-                  coreLibraryDesugaringEnabled true
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
+                  # Create dependencies block
+                  text += """
+
+              dependencies {
+                  coreLibraryDesugaring(
+                      "com.android.tools:desugar_jdk_libs:2.1.5"
+                  )
               }
-              """,
-                      1
-                  )
-
-          # dependency
-          if "desugar_jdk_libs" not in text:
-
-              if "dependencies {" not in text:
-                  raise SystemExit(
-                      "ERROR: dependencies block not found."
-                  )
-
-              text = text.replace(
-                  "dependencies {",
-                  """dependencies {
-                  coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'""",
-                  1
-              )
+              """
 
           with open(path, "w", encoding="utf-8") as f:
               f.write(text)
 
-          print("Groovy Gradle desugaring configured.")
+          print("Core library desugaring configured successfully.")
+
           PY
 
-          fi
-
-          echo "======================================"
-          echo "FINAL APP GRADLE FILE"
-          echo "======================================"
+          echo "========================================"
+          echo "FINAL BUILD.GRADLE.KTS"
+          echo "========================================"
 
           cat "$APP_GRADLE"
 
       # ==========================================
-      # FIX WALLPAPER MANAGER
+      # VERIFY
+      # ==========================================
+
+      - name: Verify Desugaring
+        shell: bash
+        run: |
+          set -e
+
+          grep -q "isCoreLibraryDesugaringEnabled = true" "$APP_GRADLE"
+          grep -q "desugar_jdk_libs" "$APP_GRADLE"
+
+          echo "Desugaring verification PASSED."
+
+      # ==========================================
+      # WALLPAPER MANAGER NAMESPACE
       # ==========================================
 
       - name: Fix Wallpaper Manager Namespace
@@ -260,7 +228,7 @@ jobs:
             | sort -V | tail -n 1 || true)
 
           if [ -z "$PLUGIN_DIR" ]; then
-            echo "flutter_wallpaper_manager not found."
+            echo "Plugin not found."
             exit 1
           fi
 
@@ -284,40 +252,20 @@ jobs:
 
               match = re.search(r'android\s*\{', text)
 
-              if not match:
-                  raise SystemExit(
-                      "ERROR: android block not found."
+              if match:
+
+                  text = (
+                      text[:match.end()]
+                      + '\n    namespace "com.flutter_wallpaper_manager"\n'
+                      + text[match.end():]
                   )
 
-              text = (
-                  text[:match.end()]
-                  + '\n    namespace "com.flutter_wallpaper_manager"\n'
-                  + text[match.end():]
-              )
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(text)
 
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(text)
+          print("Wallpaper manager namespace checked.")
 
-          print("Wallpaper manager namespace fixed.")
           PY
-
-      # ==========================================
-      # VERIFY
-      # ==========================================
-
-      - name: Verify Desugaring
-        shell: bash
-        run: |
-          set -e
-
-          echo "Checking desugaring configuration..."
-
-          if ! grep -q "desugar_jdk_libs" "$APP_GRADLE"; then
-            echo "ERROR: desugar_jdk_libs was NOT added."
-            exit 1
-          fi
-
-          echo "Desugaring dependency found."
 
       # ==========================================
       # BUILD APK
@@ -331,7 +279,7 @@ jobs:
       # SAVE APK
       # ==========================================
 
-      - name: Save Real APK
+      - name: Save APK
         uses: actions/upload-artifact@v4
         with:
           name: Real-BTS-Army-APK
